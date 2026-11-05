@@ -5,10 +5,9 @@ SRC     := src
 BIN     := build
 
 LIB     := $(BIN)/libshm_vku.a
-TESTS   := $(BIN)/test_one_writer_one_reader \
-	   $(BIN)/test_two_writers_one_reader
+PROGS   := $(foreach t,test1 test2 test3,$(BIN)/$(t)/writer $(BIN)/$(t)/reader)
 
-all: $(LIB)
+all: $(LIB) $(PROGS)
 
 $(BIN):
 	mkdir -p $@
@@ -19,13 +18,12 @@ $(BIN)/%.o: $(SRC)/%.c include/shm_vku.h | $(BIN)
 $(LIB): $(BIN)/shm_vku.o
 	$(AR) rcs $@ $^
 
-$(BIN)/test_%: test/test_%.c $(LIB)
+# build/test1/writer is built from test/test1/writer.c, and so on
+$(PROGS): $(BIN)/%: test/%.c $(LIB)
+	mkdir -p $(@D)
 	$(CC) $(CFLAGS) $^ -o $@
-
-test: $(TESTS)
-	@for t in $(TESTS); do ./$$t || exit 1; done
 
 clean:
 	rm -rf $(BIN)
 
-.PHONY: all test clean
+.PHONY: all clean

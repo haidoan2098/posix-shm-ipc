@@ -2,176 +2,151 @@
 
 #include <errno.h>
 #include <fcntl.h>
-#include <pthread.h>
+#include <stdbool.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
 /*
- * Lives at the start of the segment, shared by every process. The data
- * follows right after the header fields.
+ * The shared memory itself, seen by every process: the ready flag first,
+ * then the data right after it.
  *
- * @lock and @updated must be created with PTHREAD_PROCESS_SHARED, since a
- * normal pthread mutex only works between threads of one process.
+ * @ready is volatile so that the wait loop reloads it from memory on every
+ * iteration instead of keeping it in a register.
+ *
+ * volatile does not stop the CPU from reordering the data stores and the
+ * flag store. That is fine on x86 (stores stay in order), but not
+ * guaranteed on other architectures such as ARM.
  */
-struct shm_vku_header {
-	pthread_mutex_t	lock;
-	pthread_cond_t	updated;
-	unsigned long	version;	/* incremented on every write */
+struct shm {
+	volatile bool	ready;
 	unsigned char	data[];
 };
 
-static struct shm_vku_header *get_header(struct shm_vku *shm)
+/* Total bytes to map: the ready flag plus @size bytes of data */
+static size_t total_size(size_t size)
 {
-	return shm->base;
+	return sizeof(struct shm) + size;
 }
 
-static int map_segment(struct shm_vku *shm, size_t size)
+/* The shared memory, as mapped into this process */
+static struct shm *get_shm(struct shm_info *info)
 {
-	size_t map_size = sizeof(struct shm_vku_header) + size;
+	return info->base;
+}
 
-	shm->base = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_SHARED,
-			 shm->fd, 0);
-	if (shm->base == MAP_FAILED)
+static void clear_ready(struct shm *shm)
+{
+	shm->ready = false;
+}
+
+static void set_ready(struct shm *shm)
+{
+	shm->ready = true;
+}
+
+static void wait_until_ready(struct shm *shm)
+{
+	/* Sleep between checks rather than spin at 100% CPU */
+	while (!shm->ready)
+		usleep(100);
+}
+
+/* Map the object behind info->fd into this process */
+static int map_object(struct shm_info *info, size_t size)
+{
+	info->base = mmap(NULL, total_size(size), PROT_READ | PROT_WRITE,
+			  MAP_SHARED, info->fd, 0);
+	if (info->base == MAP_FAILED)
 		return -1;
 
-	shm->size = size;
+	info->size = size;
 	return 0;
 }
 
-static void init_header(struct shm_vku_header *hdr)
+/* Undo a half-finished create: close the fd and remove the object */
+static void abort_create(struct shm_info *info, const char *name)
 {
-	pthread_mutexattr_t mattr;
-	pthread_condattr_t cattr;
-
-	pthread_mutexattr_init(&mattr);
-	pthread_mutexattr_setpshared(&mattr, PTHREAD_PROCESS_SHARED);
-	/* Without this, a process dying while holding the lock hangs everyone */
-	pthread_mutexattr_setrobust(&mattr, PTHREAD_MUTEX_ROBUST);
-	pthread_mutex_init(&hdr->lock, &mattr);
-	pthread_mutexattr_destroy(&mattr);
-
-	pthread_condattr_init(&cattr);
-	pthread_condattr_setpshared(&cattr, PTHREAD_PROCESS_SHARED);
-	pthread_cond_init(&hdr->updated, &cattr);
-	pthread_condattr_destroy(&cattr);
-
-	/* ftruncate zero-fills, so version already starts at 0 */
+	close(info->fd);
+	shm_unlink(name);
 }
 
-/*
- * EOWNERDEAD means the previous owner died while holding the lock. We still
- * get the lock, but must mark it consistent before it can be used again.
- * The data may be left half-written by the dead process.
- */
-static int recover_lock(struct shm_vku_header *hdr, int ret)
+int shm_create_vku(struct shm_info *info, const char *name, size_t size)
 {
-	if (ret == EOWNERDEAD)
-		ret = pthread_mutex_consistent(&hdr->lock);
-	return ret;
-}
-
-int shm_create_vku(struct shm_vku *shm, const char *name, size_t size)
-{
-	/* O_EXCL: never silently reuse a stale object left by a crash */
-	shm->fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0666);
-	if (shm->fd < 0)
+	/* Step 1: create the object. O_EXCL refuses a leftover from a crash */
+	info->fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0666);
+	if (info->fd < 0)
 		return -1;
 
-	/* A new object has size 0; touching the mapping would SIGBUS */
-	if (ftruncate(shm->fd, sizeof(struct shm_vku_header) + size) < 0) {
-		close(shm->fd);
-		shm_unlink(name);
+	/* Step 2: give it a size. A new object has size 0 and would SIGBUS */
+	if (ftruncate(info->fd, total_size(size)) < 0) {
+		abort_create(info, name);
 		return -1;
 	}
 
-	if (map_segment(shm, size) < 0) {
-		close(shm->fd);
-		shm_unlink(name);
+	/* Step 3: map it into this process */
+	if (map_object(info, size) < 0) {
+		abort_create(info, name);
 		return -1;
 	}
 
-	init_header(get_header(shm));
+	/* ftruncate zero-fills the object, so ready already starts as false */
 	return 0;
 }
 
-int shm_open_vku(struct shm_vku *shm, const char *name, size_t size)
+int shm_open_vku(struct shm_info *info, const char *name, size_t size)
 {
-	shm->fd = shm_open(name, O_RDWR, 0);
-	if (shm->fd < 0)
+	/* Step 1: open the object that the creator made */
+	info->fd = shm_open(name, O_RDWR, 0);
+	if (info->fd < 0)
 		return -1;
 
-	if (map_segment(shm, size) < 0) {
-		close(shm->fd);
+	/* Step 2: map it into this process */
+	if (map_object(info, size) < 0) {
+		close(info->fd);
 		return -1;
 	}
 
 	return 0;
 }
 
-int shm_write_vku(struct shm_vku *shm, const void *buf, size_t len)
+int shm_write_vku(struct shm_info *info, const void *buf, size_t len)
 {
-	struct shm_vku_header *hdr = get_header(shm);
-	int ret;
+	struct shm *shm = get_shm(info);
 
-	if (len > shm->size) {
+	if (len > info->size) {
 		errno = EINVAL;
 		return -1;
 	}
 
-	ret = recover_lock(hdr, pthread_mutex_lock(&hdr->lock));
-	if (ret != 0) {
-		errno = ret;
-		return -1;
-	}
+	/* Not ready while the data is being written */
+	clear_ready(shm);
+	memcpy(shm->data, buf, len);
+	set_ready(shm);
 
-	memcpy(hdr->data, buf, len);
-	hdr->version++;
-
-	pthread_cond_broadcast(&hdr->updated);
-	pthread_mutex_unlock(&hdr->lock);
 	return 0;
 }
 
-ssize_t shm_read_vku(struct shm_vku *shm, void *buf, size_t len,
-		     unsigned long *version)
+int shm_read_vku(struct shm_info *info, void *buf, size_t len)
 {
-	struct shm_vku_header *hdr = get_header(shm);
-	int ret;
+	struct shm *shm = get_shm(info);
 
-	if (len > shm->size)
-		len = shm->size;
+	/* Never copy more than the shared memory holds */
+	if (len > info->size)
+		len = info->size;
 
-	ret = recover_lock(hdr, pthread_mutex_lock(&hdr->lock));
-	if (ret != 0) {
-		errno = ret;
-		return -1;
-	}
+	wait_until_ready(shm);
+	memcpy(buf, shm->data, len);
 
-	/* Loop: cond_wait may wake up without a new write (spurious wakeup) */
-	while (hdr->version == *version) {
-		ret = recover_lock(hdr, pthread_cond_wait(&hdr->updated,
-							  &hdr->lock));
-		if (ret != 0) {
-			pthread_mutex_unlock(&hdr->lock);
-			errno = ret;
-			return -1;
-		}
-	}
-
-	memcpy(buf, hdr->data, len);
-	*version = hdr->version;
-
-	pthread_mutex_unlock(&hdr->lock);
-	return len;
+	return 0;
 }
 
-int shm_close_vku(struct shm_vku *shm)
+int shm_close_vku(struct shm_info *info)
 {
-	if (munmap(shm->base, sizeof(struct shm_vku_header) + shm->size) < 0)
+	if (munmap(info->base, total_size(info->size)) < 0)
 		return -1;
 
-	return close(shm->fd);
+	return close(info->fd);
 }
 
 int shm_destroy_vku(const char *name)

@@ -1,61 +1,57 @@
 /*
  * Thin wrapper around POSIX shared memory.
  *
- * Segment layout:
+ * Shared memory layout:
  *
  *	+----------------------+  <- mmap base
- *	| header               |  mutex, condvar, version
+ *	| ready flag           |
  *	+----------------------+
  *	| data                 |  size bytes
  *	+----------------------+
  *
- * All access to the data goes through shm_write_vku() / shm_read_vku(),
- * which take the lock internally. Callers never touch the lock.
+ * Synchronization is a single ready flag: the writer sets it after the
+ * data is written, readers wait for it before reading. This is safe for
+ * ONE writer that writes once. There is no lock, so rewriting while a
+ * reader is reading, or using several writers, can give torn data.
  *
- * Functions return -1 on error and set errno.
+ * Functions return 0 on success, -1 on error and set errno.
  */
 #ifndef SHM_VKU_H
 #define SHM_VKU_H
 
 #include <stddef.h>
-#include <sys/types.h>
 
-struct shm_vku {
-	int	fd;
-	void	*base;	/* start of the mapping (header + data) */
-	size_t	size;	/* data capacity, header not included */
+/*
+ * What this process remembers about a shared memory it has created or
+ * opened. It lives in the process, not in the shared memory: every
+ * process has its own copy, with its own fd and base address.
+ */
+struct shm_info {
+	int	fd;	/* file descriptor from shm_open() */
+	void	*base;	/* address returned by mmap(): start of the shared memory */
+	size_t	size;	/* data capacity in bytes, the ready flag not included */
 };
 
-/* Create a new segment. Fails with EEXIST if @name already exists. */
-int shm_create_vku(struct shm_vku *shm, const char *name, size_t size);
+/* Create a new shared memory. Fails with EEXIST if @name already exists. */
+int shm_create_vku(struct shm_info *info, const char *name, size_t size);
 
-/* Open a segment created by shm_create_vku() with the same @size. */
-int shm_open_vku(struct shm_vku *shm, const char *name, size_t size);
-
-/*
- * Copy @len bytes from @buf into the segment and wake up all readers.
- * Fails with EINVAL if @len is larger than the segment.
- */
-int shm_write_vku(struct shm_vku *shm, const void *buf, size_t len);
+/* Open a shared memory created by shm_create_vku() with the same @size. */
+int shm_open_vku(struct shm_info *info, const char *name, size_t size);
 
 /*
- * Block until the segment holds data newer than *@version, then copy
- * @len bytes (at most the segment size) into @buf and update *@version.
- *
- * Start with *@version = 0 to wait for the first write. Keep passing the
- * same variable to receive each new update.
- *
- * This always returns the latest data, it is not a queue: if the writer
- * updates several times before the reader calls again, the versions in
- * between are skipped.
- *
- * Returns the number of bytes copied.
+ * Copy @len bytes from @buf into the shared memory, then set the ready
+ * flag. Fails with EINVAL if @len is larger than the data capacity.
  */
-ssize_t shm_read_vku(struct shm_vku *shm, void *buf, size_t len,
-		     unsigned long *version);
+int shm_write_vku(struct shm_info *info, const void *buf, size_t len);
+
+/*
+ * Wait until the ready flag is set, then copy @len bytes (at most the
+ * data capacity) into @buf. Waits forever if nobody writes.
+ */
+int shm_read_vku(struct shm_info *info, void *buf, size_t len);
 
 /* Unmap and close. The object itself stays in /dev/shm. */
-int shm_close_vku(struct shm_vku *shm);
+int shm_close_vku(struct shm_info *info);
 
 /* Remove the object. Existing mappings stay valid until unmapped. */
 int shm_destroy_vku(const char *name);
