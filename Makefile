@@ -21,7 +21,7 @@ $(LIB): $(BIN)/shm_vku.o
 # build/test1/writer is built from test/test1/writer.c, and so on
 $(PROGS): $(BIN)/%: test/%.c $(LIB)
 	mkdir -p $(@D)
-	$(CC) $(CFLAGS) $^ -o $@
+	$(CC) $(CFLAGS) $^ -o $@ -lrt -lpthread
 
 clean:
 	rm -rf $(BIN)
