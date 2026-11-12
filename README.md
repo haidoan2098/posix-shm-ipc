@@ -12,11 +12,11 @@ chờ flag rồi mới đọc.
 .
 ├── include/shm_vku.h      # API public
 ├── src/shm_vku.c          # Hiện thực API
-├── test/
-│   ├── test1/             # 1 writer, 1 reader
-│   ├── test2/             # 1 writer, 2 reader
-│   └── test3/             # 2 writer, 1 reader (thấy giới hạn của ready-flag)
-│       (mỗi thư mục gồm writer.c và reader.c)
+├── demo/
+│   ├── demo1/             # 1 writer, 1 reader
+│   ├── demo2/             # 1 writer, 2 reader
+│   └── demo3/             # benchmark: pipe vs shared memory
+│       (demo1, demo2 gồm writer.c và reader.c)
 ├── docs/
 ├── Makefile
 └── README.md
@@ -34,52 +34,41 @@ sudo apt-get install -y build-essential   # gcc, make, glibc headers
 ## Build
 
 ```bash
-make            # tạo build/libshm_vku.a và build/test1..3/{writer,reader}
+make            # tạo build/libshm_vku.a và build/demo1..3
 make clean      # xoá thư mục build/
 ```
 
-## Chạy test
+## Chạy demo
 
 Mở nhiều terminal, chạy từ thư mục gốc của project. Nhấn `Ctrl+C` để dừng.
 
-### Test 1: 1 writer, 1 reader
+### Demo 1: 1 writer, 1 reader
 
 ```bash
-./build/test1/writer    # terminal 1: nhấn Enter để bắt đầu ghi
-./build/test1/reader    # terminal 2: chạy trước khi nhấn Enter
+./build/demo1/writer    # terminal 1: nhấn Enter để bắt đầu ghi
+./build/demo1/reader    # terminal 2: chạy trước khi nhấn Enter
 ```
 
 **Thể hiện:** reader đứng chờ ready-flag, writer ghi xong thì reader nhận đúng
 dữ liệu. Reader luôn nhận bản mới nhất đang có.
 
-### Test 2: 1 writer, 2 reader
+### Demo 2: 1 writer, 2 reader
 
 ```bash
-./build/test2/writer    # terminal 1: nhấn Enter để bắt đầu ghi
-./build/test2/reader    # terminal 2: tự sinh 2 process reader
+./build/demo2/writer    # terminal 1: nhấn Enter để bắt đầu ghi
+./build/demo2/reader    # terminal 2: tự sinh 2 process reader
 ```
 
 **Thể hiện:** hai process khác nhau (PID khác nhau) cùng đọc một vùng shared
 memory và thấy cùng dữ liệu.
 
-### Test 3: 2 writer, 1 reader
+### Demo 3: benchmark pipe vs shared memory
 
 ```bash
-./build/test3/reader            # terminal 1: chạy trước, reader tạo shared memory
-./build/test3/writer A          # terminal 2
-./build/test3/writer B          # terminal 3
+./build/demo3/benchmark
 ```
 
-**Thể hiện:** hai writer ghi chồng lên nhau nên reader nhận dữ liệu bị lẫn,
-ready-flag không đủ cho nhiều writer. Mỗi writer lấp đầy vùng data bằng một chữ
-cái, reader in 16 ký tự lấy mẫu từ vùng đó:
-
-```
-[reader] AAAAAAAAAAAAAAAA        <- sạch
-[reader] BBBAABBBBBBBBBBB        <- lẫn A và B
-```
-
-Kết quả khác nhau mỗi lần chạy. Chỉ chạy `writer A` thì reader chỉ thấy `A`.
+**Thể hiện:** so sánh thời gian truyền 10MB giữa `pipe()` và shared memory.
 
 ## API
 
@@ -126,12 +115,12 @@ make
 gcc -Iinclude my_app.c build/libshm_vku.a -o my_app
 ```
 
-Xem `test/test1/writer.c` và `test/test1/reader.c` làm ví dụ.
+Xem `demo/demo1/writer.c` và `demo/demo1/reader.c` làm ví dụ.
 
 ## Lưu ý
 
-- **Chạy process tạo shared memory trước** các process mở nó. Ở test 1 và 2 đó
-  là writer, ở test 3 là reader.
+- **Chạy process tạo shared memory trước** các process mở nó. Ở demo 1 và 2 đó
+  là writer.
 - Writer và reader phải dùng **cùng `name` và `size`**, nên đặt chung một
   `#define`. `size` lớn hơn size thật của object sẽ làm chương trình bị `SIGBUS`
   khi chạm vào phần vượt.
@@ -140,13 +129,13 @@ Xem `test/test1/writer.c` và `test/test1/reader.c` làm ví dụ.
   cũng không biết bản đọc được là mới hay đã đọc rồi.
 - **Giới hạn của ready-flag:** chỉ an toàn với **1 writer ghi một lần**, nhiều
   reader đọc thoải mái. Không có lock, nên nếu ghi lại trong lúc reader đang đọc,
-  hoặc có nhiều writer cùng ghi, reader có thể nhận dữ liệu dở dang (xem test 3).
+  hoặc có nhiều writer cùng ghi, reader có thể nhận dữ liệu dở dang.
   Muốn dùng nhiều writer thì cần thêm khoá (ví dụ mutex dùng chung giữa các
   process).
 - Cờ `ready` là `volatile bool`: `volatile` chỉ bắt compiler luôn đọc lại cờ từ
   bộ nhớ, không ngăn CPU đổi thứ tự thao tác. Chạy đúng trên x86, chưa đảm bảo
   trên kiến trúc khác như ARM.
 - Nếu chương trình bị kill trước khi gọi `shm_destroy_vku()`, object còn sót
-  trong `/dev/shm`. Các chương trình trong `test/` tự xoá bản cũ khi khởi động;
+  trong `/dev/shm`. Các chương trình trong `demo/` tự xoá bản cũ khi khởi động;
   với chương trình của bạn thì xoá tay bằng `rm /dev/shm/<tên>` (bỏ dấu `/` đầu
   tên).
