@@ -5,7 +5,7 @@ SRC     := src
 BIN     := build
 
 LIB     := $(BIN)/libshm_vku.a
-PROGS   := $(foreach t,test1 test2 test3,$(BIN)/$(t)/writer $(BIN)/$(t)/reader)
+PROGS   := $(foreach t,demo1 demo2,$(BIN)/$(t)/writer $(BIN)/$(t)/reader) $(BIN)/demo3/benchmark
 
 all: $(LIB) $(PROGS)
 
@@ -18,8 +18,8 @@ $(BIN)/%.o: $(SRC)/%.c include/shm_vku.h | $(BIN)
 $(LIB): $(BIN)/shm_vku.o
 	$(AR) rcs $@ $^
 
-# build/test1/writer is built from test/test1/writer.c, and so on
-$(PROGS): $(BIN)/%: test/%.c $(LIB)
+# build/demo1/writer is built from demo/demo1/writer.c, and so on
+$(PROGS): $(BIN)/%: demo/%.c $(LIB)
 	mkdir -p $(@D)
 	$(CC) $(CFLAGS) $^ -o $@ -lrt -lpthread
 
